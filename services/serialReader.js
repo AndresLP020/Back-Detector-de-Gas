@@ -182,24 +182,52 @@ class SerialReader {
     console.log(`📡 Arduino: ${linea}`);
 
     try {
-      // Detectar calibración completa (equivalente a tu código Python)
-      if (linea.includes('Calibracion completa. Valor base:')) {
-        const match = linea.match(/Valor base:\s*(\d+)/);
+      // Nuevo formato: EST:SEGURO | M2A:[B:123/R:130]=7 | M2B:[B:120/R:125]=5 | M7:[B:110/R:115]=5 | T:25
+      if (linea.startsWith('EST:')) {
+        // Extraer datos con regex
+        const match = linea.match(/EST:(\w+) \| M2A:\[B:(\d+)\/R:(\d+)\]=(\d+) \| M2B:\[B:(\d+)\/R:(\d+)\]=(\d+) \| M7:\[B:(\d+)\/R:(\d+)\]=(\d+) \| T:(\d+)/);
         if (match) {
-          this.valorBase = parseInt(match[1]);
-          this.isCalibrated = true;
-          console.log(`🎯 Calibración completada. Valor base: ${this.valorBase}`);
-          
-          // Enviar notificación de calibración
-          if (this.telegramService) {
-            this.telegramService.enviarMensaje(`✅ Sensor calibrado correctamente. Valor base: ${this.valorBase}`);
-          }
-        }
-      }
+          const estado = match[1];
+          const m2a = { base: parseInt(match[2]), raw: parseInt(match[3]), nivel: parseInt(match[4]) };
+          const m2b = { base: parseInt(match[5]), raw: parseInt(match[6]), nivel: parseInt(match[7]) };
+          const mq7 = { base: parseInt(match[8]), raw: parseInt(match[9]), nivel: parseInt(match[10]) };
+          const temperatura = parseInt(match[11]);
 
-      // Detectar lectura actual (equivalente a tu código Python)
-      if (linea.includes('Valor actual:')) {
-        await this.procesarLecturaActual(linea);
+          const nivelMaximo = Math.max(m2a.nivel, m2b.nivel, mq7.nivel);
+          let nivel = 'normal';
+          if (nivelMaximo >= this.umbralPeligro) nivel = 'peligro';
+          else if (nivelMaximo >= this.umbralPrecaucion) nivel = 'precaucion';
+
+          const datosSensor = {
+            conectado: true,
+            estado,
+            sensores: {
+              MQ2A: m2a,
+              MQ2B: m2b,
+              MQ7: mq7
+            },
+            temperatura,
+            nivel,
+            nivelMaximo,
+            timestamp: new Date(),
+            ultimaLectura: linea,
+            puerto: this.currentPort
+          };
+
+          // Guardar en base de datos
+          await this.guardarEnBD(datosSensor, linea);
+
+          // Actualizar frontend en tiempo real
+          if (global.actualizarSensorData) {
+            global.actualizarSensorData(datosSensor);
+          }
+
+          // Sistema de alertas
+          await this.procesarAlertas(nivelMaximo, datosSensor);
+
+          // Subir a Cloudinary si es necesario
+          await this.verificarSubidaCloudinary();
+        }
       }
 
       // Guardar línea para archivo local (equivalente a tu archivo .txt)
@@ -271,20 +299,16 @@ class SerialReader {
 
   // Sistema de alertas (equivalente a tu código Python)
   async procesarAlertas(diferencia, valorActual) {
+    // Adaptado para el nuevo formato: diferencia = nivelMaximo, valorActual = datosSensor
     if (diferencia >= this.umbralPeligro) {
-      const mensaje = `🚨 ¡PELIGRO! El valor del sensor aumentó ${diferencia} puntos sobre el valor base (${this.valorBase}). Valor actual: ${valorActual}`;
-      
+      const mensaje = `🚨 ¡PELIGRO! Nivel máximo: ${diferencia}. Estado: ${valorActual.estado}. Temp: ${valorActual.temperatura}°C`;
       console.log('🚨 ALERTA DE PELIGRO:', mensaje);
-      
       if (this.telegramService) {
         await this.telegramService.enviarMensaje(mensaje);
       }
-      
     } else if (diferencia >= this.umbralPrecaucion) {
-      const mensaje = `⚠️ Precaución: El valor del sensor aumentó ${diferencia} puntos sobre el valor base (${this.valorBase}). Valor actual: ${valorActual}`;
-      
+      const mensaje = `⚠️ Precaución: Nivel máximo: ${diferencia}. Estado: ${valorActual.estado}. Temp: ${valorActual.temperatura}°C`;
       console.log('⚠️ ALERTA DE PRECAUCIÓN:', mensaje);
-      
       if (this.telegramService) {
         await this.telegramService.enviarMensaje(mensaje);
       }
